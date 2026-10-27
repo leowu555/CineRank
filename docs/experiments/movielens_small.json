@@ -1,0 +1,214 @@
+{
+  "dataset": {
+    "name": "ml-latest-small",
+    "source": "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip",
+    "sha256": "696d65a3dfceac7c45750ad32df2c259311949efec81f0f144fdfb91ebc9e436",
+    "identity": "MovieLens userId/movieId only. Not Django auth.User pks. Not TMDB ids.",
+    "rating_count": 100836,
+    "train_count": 80668,
+    "validation_count": 10083,
+    "test_count": 10085,
+    "train_end_timestamp": 1458635162.0,
+    "validation_end_timestamp": 1498029421.0,
+    "test_end_timestamp": 1537799250.0,
+    "train_catalog_size": 7867
+  },
+  "protocol": {
+    "split": "global chronological 80/10/10 by rating count; sort timestamp, user_id, item_id",
+    "fit": "train ratings only (popularity counts/means and item cosine neighbors). Validation and test rows are never passed to fit.",
+    "tune": "item-item neighbor_k on validation NDCG@10 only; grid EVAL_NEIGHBOR_K_GRID; test is not used",
+    "test": "single evaluation with chosen MovieLens k; model still train-only",
+    "relevance": "rating >= 4.0 on the eval split, item must appear in the train catalog",
+    "exclude": "items the user rated in train (same for popularity and item-item)",
+    "user_eligibility": "same cohort for every strategy: train history AND at least one relevant in-catalog eval item",
+    "item_candidates": "Both methods may only return train-catalog ids not in the user train history. Popularity ranks that full unseen catalog. Item-item only ranks neighbor-linked items and may return fewer than 10.",
+    "coverage_at_10": "|union of each eligible user top-10| / |train catalog|. Shorter item-item lists still count only the ids they returned.",
+    "k": 10,
+    "app_neighbor_k": 20,
+    "eval_neighbor_k_grid": [
+      10,
+      20,
+      40
+    ],
+    "app_vs_eval": "Live API re-fits item-item on Postgres TMDB ratings with APP_NEIGHBOR_K=20. These MovieLens metrics use a different id space and a tuned neighbor_k. They are not measurements of the running app.",
+    "positive_history_threshold": 4,
+    "item_item_score": "sum_i sim(i,j) * r(u,i) for i rated >= 4"
+  },
+  "test_cohort": {
+    "eval_users": 74,
+    "eligible_users": 18,
+    "skipped_users_no_history": 54,
+    "skipped_users_no_positive_eval_ratings": 2,
+    "skipped_users_all_relevant_outside_catalog": 0,
+    "skipped_users_no_relevant": 2,
+    "dropped_relevant_not_in_catalog": 235,
+    "relevant_items": 320,
+    "accounting": "74 eval users = 54 no train history + 2 no eval rating>=4 + 0 relevant only outside train catalog + 18 eligible"
+  },
+  "validation": {
+    "popularity": {
+      "name": "popularity",
+      "recall_at_10": 0.03648045076616505,
+      "ndcg_at_10": 0.03299820826020895,
+      "catalog_coverage_at_10": 0.006991229185204017,
+      "eligible_users": 21,
+      "stats": {
+        "eval_users": 62,
+        "eligible_users": 21,
+        "skipped_users_no_history": 41,
+        "skipped_users_no_positive_eval_ratings": 0,
+        "skipped_users_all_relevant_outside_catalog": 0,
+        "skipped_users_no_relevant": 0,
+        "dropped_relevant_not_in_catalog": 65,
+        "relevant_items": 346,
+        "accounting": "62 eval users = 41 no train history + 0 no eval rating>=4 + 0 relevant only outside train catalog + 21 eligible"
+      },
+      "extra": {}
+    },
+    "item_item_grid": [
+      {
+        "name": "item_item",
+        "recall_at_10": 0.04593452424462877,
+        "ndcg_at_10": 0.05486986908790009,
+        "catalog_coverage_at_10": 0.015380704207448836,
+        "eligible_users": 21,
+        "stats": {
+          "eval_users": 62,
+          "eligible_users": 21,
+          "skipped_users_no_history": 41,
+          "skipped_users_no_positive_eval_ratings": 0,
+          "skipped_users_all_relevant_outside_catalog": 0,
+          "skipped_users_no_relevant": 0,
+          "dropped_relevant_not_in_catalog": 65,
+          "relevant_items": 346,
+          "accounting": "62 eval users = 41 no train history + 0 no eval rating>=4 + 0 relevant only outside train catalog + 21 eligible"
+        },
+        "extra": {
+          "neighbor_k": 10,
+          "fit_seconds": 4.183
+        }
+      },
+      {
+        "name": "item_item",
+        "recall_at_10": 0.06130747559318988,
+        "ndcg_at_10": 0.04798881480576607,
+        "catalog_coverage_at_10": 0.014618024659972036,
+        "eligible_users": 21,
+        "stats": {
+          "eval_users": 62,
+          "eligible_users": 21,
+          "skipped_users_no_history": 41,
+          "skipped_users_no_positive_eval_ratings": 0,
+          "skipped_users_all_relevant_outside_catalog": 0,
+          "skipped_users_no_relevant": 0,
+          "dropped_relevant_not_in_catalog": 65,
+          "relevant_items": 346,
+          "accounting": "62 eval users = 41 no train history + 0 no eval rating>=4 + 0 relevant only outside train catalog + 21 eligible"
+        },
+        "extra": {
+          "neighbor_k": 20,
+          "fit_seconds": 3.812
+        }
+      },
+      {
+        "name": "item_item",
+        "recall_at_10": 0.06795473528923006,
+        "ndcg_at_10": 0.06623173931282159,
+        "catalog_coverage_at_10": 0.015507817465361637,
+        "eligible_users": 21,
+        "stats": {
+          "eval_users": 62,
+          "eligible_users": 21,
+          "skipped_users_no_history": 41,
+          "skipped_users_no_positive_eval_ratings": 0,
+          "skipped_users_all_relevant_outside_catalog": 0,
+          "skipped_users_no_relevant": 0,
+          "dropped_relevant_not_in_catalog": 65,
+          "relevant_items": 346,
+          "accounting": "62 eval users = 41 no train history + 0 no eval rating>=4 + 0 relevant only outside train catalog + 21 eligible"
+        },
+        "extra": {
+          "neighbor_k": 40,
+          "fit_seconds": 3.658
+        }
+      }
+    ],
+    "chosen_neighbor_k": 40,
+    "item_item": {
+      "name": "item_item",
+      "recall_at_10": 0.06795473528923006,
+      "ndcg_at_10": 0.06623173931282159,
+      "catalog_coverage_at_10": 0.015507817465361637,
+      "eligible_users": 21,
+      "stats": {
+        "eval_users": 62,
+        "eligible_users": 21,
+        "skipped_users_no_history": 41,
+        "skipped_users_no_positive_eval_ratings": 0,
+        "skipped_users_all_relevant_outside_catalog": 0,
+        "skipped_users_no_relevant": 0,
+        "dropped_relevant_not_in_catalog": 65,
+        "relevant_items": 346,
+        "accounting": "62 eval users = 41 no train history + 0 no eval rating>=4 + 0 relevant only outside train catalog + 21 eligible"
+      },
+      "extra": {
+        "neighbor_k": 40,
+        "fit_seconds": 3.658
+      }
+    }
+  },
+  "test": {
+    "popularity": {
+      "name": "popularity",
+      "recall_at_10": 0.04741161616161616,
+      "ndcg_at_10": 0.10415667479546448,
+      "catalog_coverage_at_10": 0.007499682216855218,
+      "eligible_users": 18,
+      "stats": {
+        "eval_users": 74,
+        "eligible_users": 18,
+        "skipped_users_no_history": 54,
+        "skipped_users_no_positive_eval_ratings": 2,
+        "skipped_users_all_relevant_outside_catalog": 0,
+        "skipped_users_no_relevant": 2,
+        "dropped_relevant_not_in_catalog": 235,
+        "relevant_items": 320,
+        "accounting": "74 eval users = 54 no train history + 2 no eval rating>=4 + 0 relevant only outside train catalog + 18 eligible"
+      },
+      "extra": {}
+    },
+    "item_item": {
+      "name": "item_item",
+      "recall_at_10": 0.03375420875420875,
+      "ndcg_at_10": 0.06111311627502082,
+      "catalog_coverage_at_10": 0.014109571628320834,
+      "eligible_users": 18,
+      "stats": {
+        "eval_users": 74,
+        "eligible_users": 18,
+        "skipped_users_no_history": 54,
+        "skipped_users_no_positive_eval_ratings": 2,
+        "skipped_users_all_relevant_outside_catalog": 0,
+        "skipped_users_no_relevant": 2,
+        "dropped_relevant_not_in_catalog": 235,
+        "relevant_items": 320,
+        "accounting": "74 eval users = 54 no train history + 2 no eval rating>=4 + 0 relevant only outside train catalog + 18 eligible"
+      },
+      "extra": {
+        "neighbor_k": 40,
+        "fit_seconds": 3.888
+      }
+    }
+  },
+  "hybrid": null,
+  "runtime_seconds": 16.604,
+  "reproduce": [
+    "cd backend",
+    "python -m recommendations.recsys.cli"
+  ],
+  "download": {
+    "attempted": false,
+    "ok": true,
+    "error": null
+  }
+}
