@@ -44,6 +44,15 @@ class RatingSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate(self, attrs):
+        # Ownership always comes from the authenticated user, never the body.
+        for key in ('user', 'user_id'):
+            if key in getattr(self, 'initial_data', {}):
+                raise serializers.ValidationError(
+                    {key: 'Cannot set rating owner from the request body.'}
+                )
+        return attrs
+
     def validate_score(self, value):
         if value < 1 or value > 5:
             raise serializers.ValidationError('Score must be between 1 and 5.')

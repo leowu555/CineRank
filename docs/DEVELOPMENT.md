@@ -144,8 +144,15 @@ API: `http://127.0.0.1:8000` · UI: `http://localhost:5173`
 From `backend/` with `SECRET_KEY` set (`.env` or the environment):
 
 ```bash
-python manage.py test config movies
+DJANGO_SETTINGS_MODULE=config.test_settings python manage.py test
 python manage.py check
+python -m recommendations.recsys.cli --skip-download
+```
+
+`config.test_settings` uses in-memory SQLite (no Postgres). Optional isolated Postgres (creates/drops `cinerank_isolated_test`, not `movie_recommender`):
+
+```bash
+DJANGO_SETTINGS_MODULE=config.test_settings_postgres python manage.py test
 ```
 
 Frontend production build (optional):

@@ -1,183 +1,205 @@
 # CineRank
 
-Search live TMDB titles, rate them 1–5, and get personalized recommendations from **user-based collaborative filtering**.
+CineRank is a local movie discovery app: search titles from TMDB, sign in, rate films 1–5, and get a **For You** list of titles you have not rated. Recommendations use **sparse item–item cosine** collaborative filtering on the ratings table, with a **popularity** fallback when that list is empty.
 
-This repository is a working full-stack product (Django + React + PostgreSQL) plus a documented path toward measured recommenders. The live loop is real. Offline ranking metrics (Recall@K, NDCG@K) are **not** implemented yet; seed users are a **demo fixture**, not an evaluation set.
-
-Long-term plan: [`docs/PROJECT_SPEC.md`](docs/PROJECT_SPEC.md) · tasks: [`docs/ROADMAP.md`](docs/ROADMAP.md) · install: [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) · env vars: [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
+Personalized For You, accounts, and ratings run on **Django + PostgreSQL**. Movie search and details are a **TMDB HTTP proxy**. A React (Vite) UI talks to the API over REST.
 
 ---
 
-## Demo (5 minutes)
+## What you can do
 
-Prerequisites and install: [Quick start](#quick-start) or [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). Seed only if you want these accounts:
+| Flow | Where |
+|------|--------|
+| Search by title, sort the result list in the browser | Home `/` |
+| Open details (overview, genres, runtime, poster) | `/movie/:id` |
+| Register, log in, log out | `/register`, `/login` |
+| Rate 1–5 (create or overwrite) | Movie details, while signed in |
+| See your ratings | Profile `/profile` |
+| Unseen recommendations | For You `/recommendations` (auth required) |
+| Watchlist | `/watchlist` — **this browser only** (`localStorage`) |
 
-```bash
-cd backend
-python manage.py shell -c "exec(open('seed_demo_data.py').read())"
-```
-
-| Username | Password   | Taste (seed ratings) |
-|----------|------------|----------------------|
-| `alice`  | `demo1234` | Nolan / prestige: Inception, Dark Knight, Interstellar, Fight Club, Shawshank |
-| `bob`    | `demo1234` | Mix: Inception, Dark Knight, Parasite, Pulp Fiction, Forrest Gump |
-| `carol`  | `demo1234` | Drama / festival: Interstellar, Parasite, Shawshank, Forrest Gump, Pulp Fiction |
-
-Open **http://127.0.0.1:5173** (use `127.0.0.1`, not `localhost`, so CORS matches the API).
-
-1. Search **Inception** — catalog comes from TMDB through Django, not from a local movie table.
-2. Log in as **alice**.
-3. Open **For You**. With only the seed ratings, you should see **Pulp Fiction**, **Parasite**, and **Forrest Gump** (`method`: `collaborative_filtering`). Alice never rated those; Bob and Carol did, and they overlap with Alice on Nolan/prestige titles.
-4. Rate something new (for example a title Bob/Carol did not seed). Refresh **For You** — the matrix is rebuilt on that request.
-5. **Profile** shows alice’s stored ratings. **Watchlist** is browser `localStorage` (not per-account in Postgres).
-
-Log in as **bob** or **carol** to see a different neighbor set (table below).
-
-Lambda Function URL (if you point `VITE_API_BASE_URL` at it) covers **search and details only**. Auth, ratings, and recommendations need local Django + Postgres.
+There is no in-app control to delete a rating. `DELETE /api/ratings/<movie_id>/` exists on the API.
 
 ---
 
-## What is implemented vs planned
+## Technologies in use
 
-| Working now | Not yet (do not demo as done) |
-|-------------|-------------------------------|
-| TMDB search + details | Canonical `Movie` table / MovieLens IDs |
-| DRF token auth, ratings in Postgres | Persistent per-user watchlist |
-| In-request user–user CF | Train/serve split, Recall@K / NDCG@K |
-| React: search, details, rate, For You, profile | Hybrid / two-tower / LTR |
-| Optional Lambda zip for the TMDB proxy | Frontend on S3, API Gateway |
+| Technology | Role |
+|------------|------|
+| Python, Django 6, Django REST Framework | HTTP API, auth, ORM |
+| DRF `TokenAuthentication` | `Authorization: Token …` |
+| PostgreSQL (`psycopg2-binary`) | Users, tokens, ratings |
+| `requests` | TMDB search and details |
+| NumPy, SciPy, scikit-learn | Sparse matrices and cosine similarity |
+| React 19, Vite 8, React Router 7 | UI (JavaScript, not TypeScript) |
+| python-dotenv, django-cors-headers | Local env and CORS |
+| Mangum | Optional AWS Lambda **adapter** for the same ASGI app (packaging only; see below) |
 
 ---
 
 ## Architecture
 
 ```text
-React (Vite)  --REST JSON-->  Django + DRF
-                                 |           |
-                          PostgreSQL      TMDB HTTP
-                          users, tokens,  live catalog
-                          ratings
-
-Optional: same ASGI app via Mangum on a Lambda Function URL
-(movie search/details in practice; no Postgres personalization on that path)
+Browser (Vite, default http://127.0.0.1:5173)
+    REST JSON
+Django / DRF (default http://127.0.0.1:8000)
+    ├── TMDB  (search + details; no movie table)
+    └── PostgreSQL  (auth.User, authtoken.Token, ratings.Rating)
+            └── recommendations/recsys  (fit + score in the API process)
 ```
 
-**Identity:** Django `auth.User`. Movie identity is the **TMDB integer** on `ratings.Rating.movie_id`. There is no `Movie` model; title and poster are denormalized onto the rating row for the UI.
+Movie identity in the app is the **TMDB integer** stored on `ratings.Rating.movie_id`. Title and poster are copied onto the rating row for display. There is no `Movie` model.
 
-**Why that split:** Discovery should stay current with TMDB. Personalization only needs titles users have already rated. A catalog table is a later ingest problem (Phase 2), not a blocker for CF on overlapping ratings.
-
-**Why one Django process:** The recommender is a single view over a small rating table. Splitting trainer, feature store, and model server would not change the demo and would hide the algorithm. When offline eval exists, algorithms move to a Python package with `fit` / `score` / `recommend` that does not need HTTP ([ADR 0001](docs/decisions/0001-keep-django-monolith.md)).
+**For You:** `GET /api/recommendations/` (token required) loads **all** rating rows, converts them to `RatingEvent`s, and calls `recommendations.recsys.pipeline.recommend` (default `cf='item_item'`). The process **fits item neighbors on that full table every request**. Nothing is written to a model file.
 
 ---
 
-## Recommendation algorithm
+## Authentication and data
 
-`GET /api/recommendations/` (header `Authorization: Token …`).
-
-### Steps
-
-1. Load **all** ratings. Distinct users × distinct `movie_id`s become a dense NumPy matrix. Unrated cells are **0**.
-2. If the current user has no ratings, or the table is empty → `{ "method": "empty" }`.
-3. If there is only one user in the matrix → return that user’s top scores → `{ "method": "fallback_self" }`.
-4. `sklearn.metrics.pairwise.cosine_similarity` on user rows. Zero the current user’s self-similarity. Take up to **5** neighbors with similarity **> 0**.
-5. From those neighbors, consider movies scored **≥ 4** that the current user has not rated. Rank by `similarity × neighbor_score` (keep the max if two neighbors both liked it). Return up to **10** items → `{ "method": "collaborative_filtering" }`.
-6. If that set is empty → other users’ distinct titles (not a true popularity rank) → `{ "method": "fallback_popular" }`.
-
-`predicted_score` in the JSON is the **neighbor’s rating**, not a fitted predicted rating.
-
-### Why user–user cosine
-
-- The product question is “people like you also liked …”, which maps directly onto user similarity.
-- Cosine is the default in scikit-learn and is easy to explain: overlap in direction of the rating vector, not raw magnitude.
-- Item–item CF, matrix factorization, and content features need a catalog and a train/test protocol this repo does not have yet.
-
-### Known limitations (intentional for this version)
-
-| Choice | Effect |
-|--------|--------|
-| Zeros in the dense matrix | Cosine treats “never rated” like a 0. That is **not** “dislike”; it distorts similarity as the catalog of rated IDs grows. Sparse item–item CF is the planned fix. |
-| Rebuild on every request | Correct for a demo-sized table; not a serving architecture. |
-| Candidates = already-rated movies only | Cannot recommend a TMDB title nobody in the database has rated. |
-| No train/test split | Cannot claim generalization. Seed walkthrough ≠ model quality. |
-| `fallback_popular` uses `.distinct()[:5]` | Order is not “most rated”; it is a sparse-overlap escape hatch. |
+- Register / login return a DRF token. The UI stores token and user JSON in `localStorage` and sends `Authorization: Token <key>`.
+- Logout deletes the server token. `/api/auth/me/` requires a valid token.
+- Ratings are always attached to `request.user`. A body field `user` or `user_id` is rejected. List/get/delete are scoped to the current user (`404` if the row is not yours).
+- Unique `(user, movie_id)` is enforced in the database. Score 1–5 is enforced in `RatingSerializer`, not as a database check constraint.
 
 ---
 
-## Measured results
+## Recommendations (live app)
 
-**Not measured:** Recall@K, NDCG@K, latency SLOs, A/B, production QPS. Do not treat the seed walkthrough as those.
+**Item–item cosine** (`ItemItemModel` in `recommendations/recsys/item_item.py`):
 
-### Seed-set collaborative filtering (reproducible)
+1. Build a SciPy **CSR** matrix of shape **(items × users)** from **observed** ratings only.
+2. For each item, compute cosine similarity to all items (one dense similarity **row** at a time; no full dense item×item matrix is allocated). Ignore self-similarity. Keep up to **`APP_NEIGHBOR_K = 20`** neighbors with similarity **> 0**.
+3. For the current user, take items they rated **≥ 4**. Accumulate  
+   `score(j) = Σ_i sim(i,j) × r(u,i)`  
+   for neighbors `j` they have not already rated.
+4. Sort by that weight descending, then `item_id` ascending. Return up to 10 titles.
 
-Input: `backend/seed_demo_data.py` only (three users, eight movies). Same procedure as `recommendations/views.py` (dense cosine, neighbors with sim > 0, neighbor score ≥ 4, rank `sim × score`).
+That weight is a **ranking score**, not a predicted star rating. The JSON does not include `predicted_score`.
 
-User–user cosine on that matrix:
+**Missing ratings:** they are simply absent from the CSR (a structural zero in the sparse vector). Cosine still uses the usual dot product, so a missing rating contributes 0 to the product. Sparsity saves memory; it does not encode “unknown” as a distinct value.
 
-|        | alice  | bob    | carol  |
-|--------|--------|--------|--------|
-| alice  | 1.000  | 0.418  | 0.404  |
-| bob    | 0.418  | 1.000  | 0.532  |
-| carol  | 0.404  | 0.532  | 1.000  |
+**Popularity fallback** (`rank_popularity`): if item–item returns nothing but other titles remain, rank unseen items by **rating count** (desc), **mean score** (desc), **item_id** (asc). `method` is `fallback_popular`.
 
-Bob and Carol share more titles (Parasite, Pulp Fiction, Forrest Gump) than either shares with Alice, so they are each other’s nearest neighbor.
+**Empty:** if the user has already rated every movie that appears in the ratings table, `method` is `empty`.
 
-Expected **For You** lists (titles the user has not rated):
+A signed-in user with **no** ratings still gets popularity of the whole catalog (`fallback_popular`) when other people have rated something.
 
-| User  | Recommendations (rank order) | Why |
-|-------|------------------------------|-----|
-| alice | Pulp Fiction, Parasite, Forrest Gump | Closest neighbor is Bob (`sim ≈ 0.42`); he rated Pulp Fiction and Parasite 5. Forrest Gump comes from Carol (Bob rated it 3, so it is dropped by the ≥ 4 rule). |
-| bob   | Shawshank, Interstellar, Fight Club | Closest neighbor is Carol (`sim ≈ 0.53`). Fight Club is Alice’s 5. |
-| carol | Inception, The Dark Knight, Fight Club | Closest neighbor is Bob; Fight Club from Alice. |
+HTTP default is item–item. A legacy user–user implementation remains in the package (`cf='user_user'`) and is **not** what the API calls.
 
-If **For You** does not match this table, extra ratings exist in Postgres, or the seed was not applied.
+---
 
-### Automated checks (current)
+## Live app vs MovieLens evaluation
 
-From `backend/` with `SECRET_KEY` set:
+| | Application | Offline eval |
+|--|-------------|--------------|
+| Users | Django `auth.User` | MovieLens `userId` |
+| Movies | TMDB ids on `Rating` | MovieLens `movieId` |
+| Data | PostgreSQL | `data/ml-latest-small/` (not loaded into Django) |
+| Neighbor `k` | `APP_NEIGHBOR_K = 20` | grid `{10,20,40}` on **validation**; test used **40** |
+| Fit | Every For You request | Once on the **train** split |
+
+Those metrics are **not** measurements of live For You quality.
+
+**Dataset:** [ml-latest-small](https://files.grouplens.org/datasets/movielens/ml-latest-small.zip), SHA-256 `696d65a3dfceac7c45750ad32df2c259311949efec81f0f144fdfb91ebc9e436`. 100,836 ratings → 80,668 / 10,083 / 10,085 by global time (80/10/10). Train catalog 7,867 movies. Fit train only. Relevance: eval-split rating ≥ 4 **and** movie in the train catalog. History for scoring is **train only** (validation ratings are not added at test time).
+
+**Test cohort (same 18 users for both methods):** 74 test users = 54 with no train history + 2 with no test rating ≥ 4 + 0 excluded only for catalog-miss + **18 eligible**. Among users who had ≥4 test titles, 235 **user–movie** relevant pairs (193 distinct movies, 15 of the 18 eligible users) were dropped because the movie was not in the train catalog.
+
+**Test results** (from `docs/experiments/movielens_small.json`, CLI run 2026-10-27):
+
+| Strategy | Recall@10 | NDCG@10 | Coverage@10 |
+|----------|-----------|---------|-------------|
+| Popularity | **0.047** | **0.104** | 0.007 |
+| Item–item (`k=40`) | 0.034 | 0.061 | **0.014** |
+
+**Popularity is ahead on this test set.** Item–item was ahead on validation. Coverage@10 is `|union of the 18 lists’ top-10| / 7867`. Higher coverage here is not higher accuracy. Eighteen users is a small cohort; a global time split leaves most test users without train history.
+
+**Coverage@10** uses only ids actually returned (item–item lists may be shorter than 10).
+
+---
+
+## Demo (local)
+
+Seed accounts (optional; writes the development database):
 
 ```bash
-python manage.py test config movies
-python manage.py check
+cd backend
+python manage.py shell -c "exec(open('seed_demo_data.py').read())"
 ```
 
-These cover env parsing and TMDB proxy behavior with **mocked** HTTP. There are **no** recommender or auth isolation tests yet (roadmap 1.4).
+`alice` / `bob` / `carol`, password `demo1234`.
+
+1. Open **http://127.0.0.1:5173** (prefer `127.0.0.1` so CORS matches the API).
+2. Search **Inception**.
+3. Log in as `alice`.
+4. Open **For You**. With only the seed ratings, item–item should list **Pulp Fiction**, **Parasite**, and **Forrest Gump** (`method`: `item_item`).
+5. Profile shows saved ratings. Watchlist is device-local.
+
+This walkthrough is implied by the seed file plus the current recommender; a **browser session was not re-verified** in the last check (dev servers were not running).
 
 ---
 
-## Quick start
+## Setup
 
-Verified: Python **3.13**, Node **24** / npm **11**, PostgreSQL **16**, TMDB API key. Details and lockfile rules: [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+Needs Python 3.13 (lock verified on 3.13), Node for the UI, PostgreSQL, a TMDB API key. Copy `backend/.env.example` to `backend/.env` if needed; set `SECRET_KEY`, `TMDB_API_KEY`, and `DB_*`. Do not overwrite an existing `.env`. Variables: `docs/CONFIGURATION.md`.
 
 ```bash
-# Postgres
-brew services start postgresql@16
-createdb movie_recommender   # first time only
-
 # API
 cd backend
-python3.13 -m venv venv      # only if venv/ does not exist
+python3.13 -m venv venv          # only if venv/ does not exist
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env         # skip if .env already exists; never overwrite secrets
-# set SECRET_KEY, TMDB_API_KEY, DB_* — see docs/CONFIGURATION.md
 python manage.py migrate
 python manage.py runserver 127.0.0.1:8000
 ```
 
 ```bash
-# UI (second terminal)
+# UI
 cd frontend
 npm ci
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-UI: `http://127.0.0.1:5173` · API: `http://127.0.0.1:8000`
+```bash
+# Tests (do not use the development database)
+cd backend
+DJANGO_SETTINGS_MODULE=config.test_settings python manage.py test
+# optional: isolated Postgres database cinerank_isolated_test
+DJANGO_SETTINGS_MODULE=config.test_settings_postgres python manage.py test
+```
 
-`pip install -r requirements.txt` does not uninstall leftover packages in an old venv. Auth is DRF **TokenAuthentication**, not JWT.
+Recorded: **55 tests OK** on in-memory SQLite and on isolated PostgreSQL (2026-10-27). **`npm run build`** succeeded (Vite 8.0.7). Live login in a browser was **not** recorded in that pass.
+
+```bash
+# MovieLens eval (writes docs/experiments/movielens_small.json)
+cd backend
+python -m recommendations.recsys.cli
+# if data/ml-latest-small is already extracted:
+python -m recommendations.recsys.cli --skip-download
+```
+
+`--include-hybrid` is an **experimental** extra (TF-IDF + rank fusion). It is **not** used by the API. The default JSON has `"hybrid": null`. Do not treat it as a shipped feature.
+
+**Lambda:** `config.lambda_handler.handler` wraps Django ASGI with Mangum (`lifespan="off"`). Zip packaging is documented under `docs/DEVELOPMENT.md`. That is integration code, not a verified live deploy. Even if a Function URL were configured, **For You still needs PostgreSQL**; the documented Lambda path is the TMDB proxy, not personalized recommendations.
 
 ---
 
-## API (local Django)
+## Layout
+
+```text
+backend/config/           settings, URLs, env, Lambda adapter, test settings
+backend/accounts/         register, login, logout, me
+backend/movies/           TMDB search + details
+backend/ratings/           Rating model + CRUD
+backend/recommendations/  HTTP view + recsys/ (algorithms, eval CLI)
+backend/seed_demo_data.py
+frontend/src/pages/        UI screens
+frontend/src/context/      AuthContext
+docs/experiments/          MovieLens result JSON
+```
+
+---
+
+## API
 
 Auth header: `Authorization: Token <token>`
 
@@ -185,30 +207,27 @@ Auth header: `Authorization: Token <token>`
 |--------|------|------|
 | GET | `/api/movies/search?query=` | no |
 | GET | `/api/movies/<tmdb_id>/` | no |
-| POST | `/api/auth/register/` `/login/` `/logout/` | login returns the token |
+| POST | `/api/auth/register/`, `/login/` | no |
 | GET | `/api/auth/me/` | yes |
-| GET/POST | `/api/ratings/` | yes (own rows) |
-| GET/DELETE | `/api/ratings/<movie_id>/` | yes |
+| POST | `/api/auth/logout/` | yes |
+| GET, POST | `/api/ratings/` | yes (own rows; POST upserts, HTTP 201) |
+| GET, DELETE | `/api/ratings/<movie_id>/` | yes |
 | GET | `/api/recommendations/` | yes |
 
-Rating body:
+Rating body: `{ "movie_id", "title", "poster_url", "score" }` with `score` in 1–5.
 
-```json
-{ "movie_id": 27205, "title": "Inception", "poster_url": "https://image.tmdb.org/t/p/w500/...", "score": 5 }
-```
-
----
-
-## Repository
-
-```text
-backend/   Django apps: movies, accounts, ratings, recommendations; Lambda handler
-frontend/  React (Vite) — search, details, auth, For You, profile, watchlist
-docs/      spec, roadmap, progress, config, development, ADRs
-```
+For You body: `{ "results": [{ "movie_id", "title", "poster_url", "reason" }], "method", "message"? }`  
+`method` is `item_item`, `fallback_popular`, or `empty`.
 
 ---
 
-## License
+## Limitations (verified)
 
-Personal project for learning and portfolio use.
+- For You **re-fits on every request** over the full ratings table; there is no saved neighbor artifact.
+- App neighbor **k = 20**; MovieLens test used **k = 40**.
+- Watchlist and recent searches are **localStorage**, not per account.
+- Rating **delete** is API-only; the details page only create/updates via POST.
+- Score range is serializer-only; `PositiveSmallIntegerField` has no 1–5 check in SQL.
+- MovieLens test **N = 18**; popularity **outperformed** item–item there.
+- No browser walkthrough or live AWS function was verified in the last check.
+- The Django `watchlist` app is installed but has no URLs or models.

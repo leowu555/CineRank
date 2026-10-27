@@ -44,7 +44,8 @@ function RecommendationsPage() {
       <section className="page-intro">
         <h1 className="page-title">Recommended for you</h1>
         <p className="page-intro-text">
-          Suggestions based on how you and others have rated movies.
+          Unseen titles from other people&apos;s ratings. If overlap is too thin,
+          the list falls back to titles with the most ratings.
         </p>
         {method && (
           <p className="method-badge">Method: {method.replaceAll('_', ' ')}</p>
@@ -87,7 +88,7 @@ function RecommendationsPage() {
 
       {!loading && results.length === 0 && !message && (
         <div className="empty-state">
-          <p>Rate a few movies first, then come back.</p>
+          <p>No unseen titles are left to recommend from current ratings.</p>
           <Link to="/" className="btn btn-primary empty-state-btn">
             Search movies
           </Link>
